@@ -1,7 +1,6 @@
 (function() {
-  var indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; };
-
-  console.log('Test knockout-datatable change');
+   var __bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; },
+    __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; };
 
   window.DataTable = (function() {
     var primitiveCompare, pureComputed;
@@ -23,6 +22,8 @@
     };
 
     function DataTable(rows, options) {
+      this.getLimitedPages = __bind(this.getLimitedPages, this);
+      this.getPages = __bind(this.getPages, this);
       var serverSideOpts;
       if (!options) {
         if (!(rows instanceof Array)) {
@@ -38,7 +39,9 @@
         sortDir: options.sortDir || 'asc',
         sortField: options.sortField || void 0,
         perPage: options.perPage || 15,
+        paginationLimit: options.paginationLimit || 10,
         filterFn: options.filterFn || void 0,
+        alwaysMatch: options.alwaysMatch || false,
         unsortedClass: options.unsortedClass || '',
         descSortClass: options.descSortClass || '',
         ascSortClass: options.ascSortClass || ''
@@ -60,24 +63,70 @@
       this.sortDir = ko.observable(this.options.sortDir);
       this.sortField = ko.observable(this.options.sortField);
       this.perPage = ko.observable(this.options.perPage);
-      this.currentPage = ko.observable(1);
-      this.filter = ko.observable('');
+      this.currentPageNumber = ko.observable(1);
+      this.filter = ko.observable('').extend({
+        rateLimit: {
+          method: "notifyWhenChangesStop",
+          timeout: 400
+        }
+      });
       this.loading = ko.observable(false);
       return this.rows = ko.observableArray([]);
     };
 
+    DataTable.prototype.getPages = function(rowCount) {
+      var page, pageNumber, pagesArr, perPage, rowIndex;
+      perPage = this.perPage();
+      rowIndex = 0;
+      pageNumber = 1;
+      pagesArr = new Array(Math.ceil(rowCount / perPage));
+      while (rowIndex < rowCount) {
+        page = {
+          number: pageNumber,
+          start: rowIndex,
+          end: Math.min(rowCount - 1, rowIndex + perPage - 1)
+        };
+        page.blanks = new Array(pagesArr.length > 1 ? perPage - (page.end - page.start + 1) : 0);
+        pagesArr[pageNumber - 1] = page;
+        pageNumber++;
+        rowIndex += perPage;
+      }
+      return pagesArr;
+    };
+
+    DataTable.prototype.getLimitedPages = function() {
+      var current, firstPage, lastPage, leftMargin, limit, pages, rightMargin;
+      pages = this.pages();
+      current = this.currentPageNumber();
+      limit = this.options.paginationLimit;
+      if (pages.length <= limit) {
+        return pages;
+      }
+      leftMargin = Math.floor(limit / 2);
+      firstPage = current - Math.floor(leftMargin);
+      if (firstPage < 1) {
+        return pages.slice(0, limit);
+      }
+      rightMargin = limit % 2 === 0 ? leftMargin - 1 : leftMargin;
+      lastPage = current + rightMargin;
+      if (lastPage > pages.length) {
+        return pages.slice(pages.length - limit, pages.length);
+      }
+      return pages.slice(firstPage - 1, lastPage);
+    };
+
     DataTable.prototype.initWithClientSidePagination = function(rows) {
-      var _defaultMatch;
+      var filterTrigger, _defaultMatch;
       this.filtering = ko.observable(false);
       this.forceFilter = ko.observable(false);
       this.filter.subscribe((function(_this) {
         return function() {
-          return _this.currentPage(1);
+          return _this.currentPageNumber(1);
         };
       })(this));
       this.perPage.subscribe((function(_this) {
         return function() {
-          return _this.currentPage(1);
+          return _this.currentPageNumber(1);
         };
       })(this));
       this.rows(rows);
@@ -97,21 +146,31 @@
           return attrMap;
         };
       })(this));
+      filterTrigger = ko.observable().extend({
+        notify: 'always'
+      });
+      this.triggerFilterCalculation = (function(_this) {
+        return function() {
+          filterTrigger.valueHasMutated();
+          return _this.currentPageNumber(1);
+        };
+      })(this);
       this.filteredRows = pureComputed((function(_this) {
         return function() {
           var filter, filterFn;
+          filterTrigger();
           _this.filtering(true);
           filter = _this.filter();
           rows = _this.rows.slice(0);
-          if (_this.forceFilter() || ((filter != null) && filter !== '')) {
+          if (_this.options.alwaysMatch || _this.forceFilter() || ((filter != null) && filter !== '')) {
             filterFn = _this.filterFn(filter);
             rows = rows.filter(filterFn);
           }
           if ((_this.sortField() != null) && _this.sortField() !== '') {
             rows.sort(function(a, b) {
               var aVal, bVal;
-              aVal = ko.utils.peekObservable(a[_this.sortField()]);
-              bVal = ko.utils.peekObservable(b[_this.sortField()]);
+              aVal = ko.utils.unwrapObservable(a[_this.sortField()]);
+              bVal = ko.utils.unwrapObservable(b[_this.sortField()]);
               if (typeof aVal === 'string') {
                 aVal = aVal.toLowerCase();
               }
@@ -150,29 +209,45 @@
         rateLimit: 50,
         method: 'notifyWhenChangesStop'
       });
-      this.pagedRows = pureComputed((function(_this) {
-        return function() {
-          var pageIndex, perPage;
-          pageIndex = _this.currentPage() - 1;
-          perPage = _this.perPage();
-          return _this.filteredRows().slice(pageIndex * perPage, (pageIndex + 1) * perPage);
-        };
-      })(this));
       this.pages = pureComputed((function(_this) {
         return function() {
-          return Math.ceil(_this.filteredRows().length / _this.perPage());
+          return _this.getPages(_this.filteredRows().length);
+        };
+      })(this));
+      this.limitedPages = pureComputed((function(_this) {
+        return function() {
+          return _this.getLimitedPages();
+        };
+      })(this));
+      this.currentPage = pureComputed((function(_this) {
+        return function() {
+          if (_this.pages().length > 0) {
+            return _this.pages()[_this.currentPageNumber() - 1];
+          } else {
+            return {
+              number: 1,
+              start: 0,
+              end: 0,
+              blanks: []
+            };
+          }
+        };
+      })(this));
+      this.pagedRows = pureComputed((function(_this) {
+        return function() {
+          return _this.filteredRows().slice(_this.currentPage().start, _this.currentPage().end + 1);
         };
       })(this));
       this.leftPagerClass = pureComputed((function(_this) {
         return function() {
-          if (_this.currentPage() === 1) {
+          if (_this.currentPageNumber() === 1) {
             return 'disabled';
           }
         };
       })(this));
       this.rightPagerClass = pureComputed((function(_this) {
         return function() {
-          if (_this.currentPage() === _this.pages()) {
+          if (_this.currentPageNumber() === _this.pages().length) {
             return 'disabled';
           }
         };
@@ -184,30 +259,23 @@
       })(this));
       this.from = pureComputed((function(_this) {
         return function() {
-          return (_this.currentPage() - 1) * _this.perPage() + 1;
+          return _this.currentPage().start + 1;
         };
       })(this));
       this.to = pureComputed((function(_this) {
         return function() {
-          var to;
-          to = _this.currentPage() * _this.perPage();
-          if (to > _this.total()) {
-            return _this.total();
-          } else {
-            return to;
-          }
+          return _this.currentPage().end + 1;
         };
       })(this));
       this.recordsText = pureComputed((function(_this) {
         return function() {
-          var from, pages, recordWord, recordWordPlural, to, total;
-          pages = _this.pages();
-          total = _this.total();
+          var from, recordWord, recordWordPlural, to, total;
           from = _this.from();
           to = _this.to();
+          total = _this.total();
           recordWord = _this.options.recordWord;
           recordWordPlural = _this.options.recordWordPlural || recordWord + 's';
-          if (pages > 1) {
+          if (_this.pages().length > 1) {
             return from + " to " + to + " of " + total + " " + recordWordPlural;
           } else {
             return total + " " + (total > 1 || total === 0 ? recordWordPlural : recordWord);
@@ -251,7 +319,7 @@
       this.replaceRows = (function(_this) {
         return function(rows) {
           _this.rows(rows);
-          _this.currentPage(1);
+          _this.currentPageNumber(1);
           return _this.filter(void 0);
         };
       })(this);
@@ -320,7 +388,7 @@
               }
               return results1;
             }).call(_this);
-            return (indexOf.call(conditionals, false) < 0) && (row.match != null ? row.match(filter) : _defaultMatch(filter, row, _this.rowAttributeMap()));
+             return (__indexOf.call(conditionals, false) < 0) && (_this.options.alwaysMatch || filter !== '' ? (row.match != null ? row.match(filter) : _defaultMatch(filter, row, _this.rowAttributeMap())) : true);
           };
         };
       })(this);
@@ -356,11 +424,11 @@
           return req.send();
         };
       })(this);
-      _gatherData = function(perPage, currentPage, filter, sortDir, sortField) {
+      _gatherData = function(perPage, currentPageNumber, filter, sortDir, sortField) {
         var data;
         data = {
           perPage: perPage,
-          page: currentPage
+          page: currentPageNumber
         };
         if ((filter != null) && filter !== '') {
           data.filter = filter;
@@ -376,12 +444,12 @@
       this.numFilteredRows = ko.observable(0);
       this.filter.subscribe((function(_this) {
         return function() {
-          return _this.currentPage(1);
+          return _this.currentPageNumber(1);
         };
       })(this));
       this.perPage.subscribe((function(_this) {
         return function() {
-          return _this.currentPage(1);
+          return _this.currentPageNumber(1);
         };
       })(this));
       ko.computed((function(_this) {
@@ -389,7 +457,7 @@
           var data;
           _this.loading(true);
           _this.filtering(true);
-          data = _gatherData(_this.perPage(), _this.currentPage(), _this.filter(), _this.sortDir(), _this.sortField());
+          data = _gatherData(_this.perPage(), _this.currentPageNumber(), _this.filter(), _this.sortDir(), _this.sortField());
           return _getDataFromServer(data, function(err, response) {
             var results, total;
             _this.loading(false);
@@ -408,49 +476,58 @@
       });
       this.pages = pureComputed((function(_this) {
         return function() {
-          return Math.ceil(_this.numFilteredRows() / _this.perPage());
+          return _this.getPages(_this.numFilteredRows());
+        };
+      })(this));
+      this.limitedPages = pureComputed((function(_this) {
+        return function() {
+          return _this.getLimitedPages();
+        };
+      })(this));
+      this.currentPage = pureComputed((function(_this) {
+        return function() {
+          return _this.pages()[_this.currentPageNumber() - 1];
+        };
+      })(this));
+      this.pagedRows = pureComputed((function(_this) {
+        return function() {
+          return _this.filteredRows().slice(_this.currentPage().start, _this.currentPage().end + 1);
         };
       })(this));
       this.leftPagerClass = pureComputed((function(_this) {
         return function() {
-          if (_this.currentPage() === 1) {
+          if (_this.currentPageNumber() === 1) {
             return 'disabled';
           }
         };
       })(this));
       this.rightPagerClass = pureComputed((function(_this) {
         return function() {
-          if (_this.currentPage() === _this.pages()) {
+          if (_this.currentPageNumber() === _this.pages().length) {
             return 'disabled';
           }
         };
       })(this));
       this.from = pureComputed((function(_this) {
         return function() {
-          return (_this.currentPage() - 1) * _this.perPage() + 1;
+          return _this.currentPage().start + 1;
         };
       })(this));
       this.to = pureComputed((function(_this) {
         return function() {
-          var to, total;
-          to = _this.currentPage() * _this.perPage();
-          if (to > (total = _this.numFilteredRows())) {
-            return total;
-          } else {
-            return to;
-          }
+          return _this.currentPage().end + 1;
         };
       })(this));
       this.recordsText = pureComputed((function(_this) {
         return function() {
-          var from, pages, recordWord, recordWordPlural, to, total;
+          var from, recordWord, recordWordPlural, to, total;
           pages = _this.pages();
           total = _this.numFilteredRows();
           from = _this.from();
           to = _this.to();
           recordWord = _this.options.recordWord;
           recordWordPlural = _this.options.recordWordPlural || recordWord + 's';
-          if (pages > 1) {
+          if (_this.pages().length > 1) {
             return from + " to " + to + " of " + total + " " + recordWordPlural;
           } else {
             return total + " " + (total > 1 || total === 0 ? recordWordPlural : recordWord);
@@ -492,7 +569,7 @@
           var data;
           _this.loading(true);
           _this.filtering(true);
-          data = _gatherData(_this.perPage(), _this.currentPage(), _this.filter(), _this.sortDir(), _this.sortField());
+          data = _gatherData(_this.perPage(), _this.currentPageNumber(), _this.filter(), _this.sortDir(), _this.sortField());
           return _getDataFromServer(data, function(err, response) {
             var results, total;
             _this.loading(false);
@@ -511,11 +588,11 @@
     DataTable.prototype.toggleSort = function(field) {
       return (function(_this) {
         return function() {
-          _this.currentPage(1);
+          _this.currentPageNumber(1);
           if (_this.sortField() === field) {
             return _this.sortDir(_this.sortDir() === 'asc' ? 'desc' : 'asc');
           } else {
-            _this.sortDir(_this.options.sortDir);
+            _this.sortDir('asc');
             return _this.sortField(field);
           }
         };
@@ -524,24 +601,24 @@
 
     DataTable.prototype.prevPage = function() {
       var page;
-      page = this.currentPage();
+      page = this.currentPageNumber();
       if (page !== 1) {
-        return this.currentPage(page - 1);
+        return this.currentPageNumber(page - 1);
       }
     };
 
     DataTable.prototype.nextPage = function() {
       var page;
-      page = this.currentPage();
+      page = this.currentPageNumber();
       if (page !== this.pages()) {
-        return this.currentPage(page + 1);
+        return this.currentPageNumber(page + 1);
       }
     };
 
     DataTable.prototype.gotoPage = function(page) {
       return (function(_this) {
         return function() {
-          return _this.currentPage(page);
+          return _this.currentPageNumber(page);
         };
       })(this);
     };
@@ -549,7 +626,7 @@
     DataTable.prototype.pageClass = function(page) {
       return pureComputed((function(_this) {
         return function() {
-          if (_this.currentPage() === page) {
+          if (_this.currentPageNumber() === page) {
             return 'active';
           }
         };
